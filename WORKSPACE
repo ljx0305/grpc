@@ -1,47 +1,69 @@
-bind(
-    name = "nanopb",
-    actual = "//third_party/nanopb",
+workspace(name = "com_github_grpc_grpc")
+
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+load("//bazel:grpc_deps.bzl", "grpc_deps", "grpc_test_only_deps")
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
+
+grpc_deps()
+
+grpc_test_only_deps()
+
+register_execution_platforms(
+    "//third_party/toolchains:local",
+    "//third_party/toolchains:local_large",
+    "//third_party/toolchains:rbe_windows",
 )
 
-bind(
-    name = "libssl",
-    actual = "@submodule_boringssl//:ssl",
+register_toolchains(
+    "//third_party/toolchains/bazel_0.26.0_rbe_windows:cc-toolchain-x64_windows",
 )
 
-bind(
-    name = "zlib",
-    actual = "@submodule_zlib//:z",
+load("@bazel_toolchains//rules:rbe_repo.bzl", "rbe_autoconfig")
+
+# Create toolchain configuration for remote execution.
+rbe_autoconfig(
+    name = "rbe_default",
 )
 
-bind(
-    name = "protobuf",
-    actual = "@submodule_protobuf//:protobuf",
+load("@bazel_toolchains//rules:environments.bzl", "clang_env")
+load("@bazel_skylib//lib:dicts.bzl", "dicts")
+
+# Create msan toolchain configuration for remote execution.
+rbe_autoconfig(
+    name = "rbe_msan",
+    env = dicts.add(
+        clang_env(),
+        {
+            "BAZEL_LINKOPTS": "-lc++:-lc++abi:-lm",
+        },
+    ),
 )
 
-bind(
-    name = "protobuf_clib",
-    actual = "@submodule_protobuf//:protoc_lib",
+load("@io_bazel_rules_python//python:pip.bzl", "pip_repositories", "pip_import")
+
+pip_import(
+    name = "grpc_python_dependencies",
+    requirements = "@com_github_grpc_grpc//:requirements.bazel.txt",
 )
 
-bind(
-    name = "protocol_compiler",
-    actual = "@submodule_protobuf//:protoc",
-)
+load("@io_bazel_rules_python//python:pip.bzl", "pip_repositories")
+load("@grpc_python_dependencies//:requirements.bzl", "pip_install")
+pip_repositories()
+pip_install()
 
-new_local_repository(
-    name = "submodule_boringssl",
-    path = "third_party/boringssl-with-bazel",
-    build_file = "third_party/boringssl-with-bazel/BUILD",
-)
+load("@upb//bazel:workspace_deps.bzl", "upb_deps")
+upb_deps()
 
-new_local_repository(
-    name = "submodule_zlib",
-    path = "third_party/zlib",
-    build_file = "third_party/zlib.BUILD",
-)
+load("@envoy_api//bazel:repositories.bzl", "api_dependencies")
+api_dependencies()
 
-new_local_repository(
-    name = "submodule_protobuf",
-    path = "third_party/protobuf",
-    build_file = "third_party/protobuf/BUILD",
-)
+load("@io_bazel_rules_go//go:deps.bzl", "go_rules_dependencies", "go_register_toolchains")
+go_rules_dependencies()
+go_register_toolchains()
+
+
+load("@build_bazel_rules_apple//apple:repositories.bzl", "apple_rules_dependencies")
+apple_rules_dependencies()
+
+load("@build_bazel_apple_support//lib:repositories.bzl", "apple_support_dependencies")
+apple_support_dependencies()

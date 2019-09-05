@@ -1,48 +1,38 @@
 /*
  *
- * Copyright 2015-2016, Google Inc.
- * All rights reserved.
+ * Copyright 2015-2016 gRPC authors.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *     * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
- *     * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  *
  */
 
+#include <fstream>
+#include <iostream>
 #include <memory>
 #include <set>
 
-#include <grpc++/impl/codegen/config_protobuf.h>
+#include <grpcpp/impl/codegen/config_protobuf.h>
 
 #include <gflags/gflags.h>
 #include <grpc/support/log.h>
 
+#include "test/cpp/qps/benchmark_config.h"
 #include "test/cpp/qps/driver.h"
 #include "test/cpp/qps/parse_json.h"
 #include "test/cpp/qps/report.h"
-#include "test/cpp/util/benchmark_config.h"
+#include "test/cpp/qps/server.h"
+#include "test/cpp/util/test_config.h"
+#include "test/cpp/util/test_credentials_provider.h"
 
 DEFINE_string(scenarios_file, "",
               "JSON file containing an array of Scenario objects");
@@ -71,18 +61,77 @@ DEFINE_string(qps_server_target_override, "",
               "Override QPS server target to configure in client configs."
               "Only applicable if there is a single benchmark server.");
 
+DEFINE_string(json_file_out, "", "File to write the JSON output to.");
+
+DEFINE_string(credential_type, grpc::testing::kInsecureCredentialsType,
+              "Credential type for communication with workers");
+DEFINE_string(
+    per_worker_credential_types, "",
+    "A map of QPS worker addresses to credential types. When creating a "
+    "channel to a QPS worker's driver port, the qps_json_driver first checks "
+    "if the 'name:port' string is in the map, and it uses the corresponding "
+    "credential type if so. If the QPS worker's 'name:port' string is not "
+    "in the map, then the driver -> worker channel will be created with "
+    "the credentials specified in --credential_type. The value of this flag "
+    "is a semicolon-separated list of map entries, where each map entry is "
+    "a comma-separated pair.");
+DEFINE_bool(run_inproc, false, "Perform an in-process transport test");
+DEFINE_int32(
+    median_latency_collection_interval_millis, 0,
+    "Specifies the period between gathering latency medians in "
+    "milliseconds. The medians will be logged out on the client at the "
+    "end of the benchmark run. If 0, this periodic collection is disabled.");
+
 namespace grpc {
 namespace testing {
 
-static std::unique_ptr<ScenarioResult> RunAndReport(const Scenario& scenario,
-                                                    bool* success) {
+static std::map<std::string, std::string>
+ConstructPerWorkerCredentialTypesMap() {
+  // Parse a list of the form: "addr1,cred_type1;addr2,cred_type2;..." into
+  // a map.
+  std::string remaining = FLAGS_per_worker_credential_types;
+  std::map<std::string, std::string> out;
+  while (!remaining.empty()) {
+    size_t next_semicolon = remaining.find(';');
+    std::string next_entry = remaining.substr(0, next_semicolon);
+    if (next_semicolon == std::string::npos) {
+      remaining = "";
+    } else {
+      remaining = remaining.substr(next_semicolon + 1, std::string::npos);
+    }
+    size_t comma = next_entry.find(',');
+    if (comma == std::string::npos) {
+      gpr_log(GPR_ERROR,
+              "Expectd --per_worker_credential_types to be a list "
+              "of the form: 'addr1,cred_type1;addr2,cred_type2;...' "
+              "into.");
+      abort();
+    }
+    std::string addr = next_entry.substr(0, comma);
+    std::string cred_type = next_entry.substr(comma + 1, std::string::npos);
+    if (out.find(addr) != out.end()) {
+      gpr_log(GPR_ERROR,
+              "Found duplicate addr in per_worker_credential_types.");
+      abort();
+    }
+    out[addr] = cred_type;
+  }
+  return out;
+}
+
+static std::unique_ptr<ScenarioResult> RunAndReport(
+    const Scenario& scenario,
+    const std::map<std::string, std::string>& per_worker_credential_types,
+    bool* success) {
   std::cerr << "RUNNING SCENARIO: " << scenario.name() << "\n";
   auto result =
       RunScenario(scenario.client_config(), scenario.num_clients(),
                   scenario.server_config(), scenario.num_servers(),
                   scenario.warmup_seconds(), scenario.benchmark_seconds(),
-                  scenario.spawn_local_worker_count(),
-                  FLAGS_qps_server_target_override.c_str());
+                  !FLAGS_run_inproc ? scenario.spawn_local_worker_count() : -2,
+                  FLAGS_qps_server_target_override, FLAGS_credential_type,
+                  per_worker_credential_types, FLAGS_run_inproc,
+                  FLAGS_median_latency_collection_interval_millis);
 
   // Amend the result with scenario config. Eventually we should adjust
   // RunScenario contract so we don't need to touch the result here.
@@ -93,6 +142,8 @@ static std::unique_ptr<ScenarioResult> RunAndReport(const Scenario& scenario,
   GetReporter()->ReportLatency(*result);
   GetReporter()->ReportTimes(*result);
   GetReporter()->ReportCpuUsage(*result);
+  GetReporter()->ReportPollCount(*result);
+  GetReporter()->ReportQueriesPerCpuSec(*result);
 
   for (int i = 0; *success && i < result->client_success_size(); i++) {
     *success = result->client_success(i);
@@ -101,24 +152,36 @@ static std::unique_ptr<ScenarioResult> RunAndReport(const Scenario& scenario,
     *success = result->server_success(i);
   }
 
+  if (FLAGS_json_file_out != "") {
+    std::ofstream json_outfile;
+    json_outfile.open(FLAGS_json_file_out);
+    json_outfile << "{\"qps\": " << result->summary().qps() << "}\n";
+    json_outfile.close();
+  }
+
   return result;
 }
 
-static double GetCpuLoad(Scenario* scenario, double offered_load,
-                         bool* success) {
+static double GetCpuLoad(
+    Scenario* scenario, double offered_load,
+    const std::map<std::string, std::string>& per_worker_credential_types,
+    bool* success) {
   scenario->mutable_client_config()
       ->mutable_load_params()
       ->mutable_poisson()
       ->set_offered_load(offered_load);
-  auto result = RunAndReport(*scenario, success);
+  auto result = RunAndReport(*scenario, per_worker_credential_types, success);
   return result->summary().server_cpu_usage();
 }
 
-static double BinarySearch(Scenario* scenario, double targeted_cpu_load,
-                           double low, double high, bool* success) {
+static double BinarySearch(
+    Scenario* scenario, double targeted_cpu_load, double low, double high,
+    const std::map<std::string, std::string>& per_worker_credential_types,
+    bool* success) {
   while (low <= high * (1 - FLAGS_error_tolerance)) {
     double mid = low + (high - low) / 2;
-    double current_cpu_load = GetCpuLoad(scenario, mid, success);
+    double current_cpu_load =
+        GetCpuLoad(scenario, mid, per_worker_credential_types, success);
     gpr_log(GPR_DEBUG, "Binary Search: current_offered_load %.0f", mid);
     if (!*success) {
       gpr_log(GPR_ERROR, "Client/Server Failure");
@@ -134,12 +197,14 @@ static double BinarySearch(Scenario* scenario, double targeted_cpu_load,
   return low;
 }
 
-static double SearchOfferedLoad(double initial_offered_load,
-                                double targeted_cpu_load, Scenario* scenario,
-                                bool* success) {
+static double SearchOfferedLoad(
+    double initial_offered_load, double targeted_cpu_load, Scenario* scenario,
+    const std::map<std::string, std::string>& per_worker_credential_types,
+    bool* success) {
   std::cerr << "RUNNING SCENARIO: " << scenario->name() << "\n";
   double current_offered_load = initial_offered_load;
-  double current_cpu_load = GetCpuLoad(scenario, current_offered_load, success);
+  double current_cpu_load = GetCpuLoad(scenario, current_offered_load,
+                                       per_worker_credential_types, success);
   if (current_cpu_load > targeted_cpu_load) {
     gpr_log(GPR_ERROR, "Initial offered load too high");
     return -1;
@@ -147,14 +212,15 @@ static double SearchOfferedLoad(double initial_offered_load,
 
   while (*success && (current_cpu_load < targeted_cpu_load)) {
     current_offered_load *= 2;
-    current_cpu_load = GetCpuLoad(scenario, current_offered_load, success);
+    current_cpu_load = GetCpuLoad(scenario, current_offered_load,
+                                  per_worker_credential_types, success);
     gpr_log(GPR_DEBUG, "Binary Search: current_offered_load  %.0f",
             current_offered_load);
   }
 
   double targeted_offered_load =
       BinarySearch(scenario, targeted_cpu_load, current_offered_load / 2,
-                   current_offered_load, success);
+                   current_offered_load, per_worker_credential_types, success);
 
   return targeted_offered_load;
 }
@@ -172,10 +238,11 @@ static bool QpsDriver() {
     abort();
   }
 
+  auto per_worker_credential_types = ConstructPerWorkerCredentialTypesMap();
   if (scfile) {
     // Read the json data from disk
     FILE* json_file = fopen(FLAGS_scenarios_file.c_str(), "r");
-    GPR_ASSERT(json_file != NULL);
+    GPR_ASSERT(json_file != nullptr);
     fseek(json_file, 0, SEEK_END);
     long len = ftell(json_file);
     char* data = new char[len];
@@ -187,7 +254,7 @@ static bool QpsDriver() {
   } else if (scjson) {
     json = FLAGS_scenarios_json.c_str();
   } else if (FLAGS_quit) {
-    return RunQuit();
+    return RunQuit(FLAGS_credential_type, per_worker_credential_types);
   }
 
   // Parse into an array of scenarios
@@ -201,15 +268,16 @@ static bool QpsDriver() {
   for (int i = 0; i < scenarios.scenarios_size(); i++) {
     if (FLAGS_search_param == "") {
       const Scenario& scenario = scenarios.scenarios(i);
-      RunAndReport(scenario, &success);
+      RunAndReport(scenario, per_worker_credential_types, &success);
     } else {
       if (FLAGS_search_param == "offered_load") {
         Scenario* scenario = scenarios.mutable_scenarios(i);
-        double targeted_offered_load =
-            SearchOfferedLoad(FLAGS_initial_search_value,
-                              FLAGS_targeted_cpu_load, scenario, &success);
+        double targeted_offered_load = SearchOfferedLoad(
+            FLAGS_initial_search_value, FLAGS_targeted_cpu_load, scenario,
+            per_worker_credential_types, &success);
         gpr_log(GPR_INFO, "targeted_offered_load %f", targeted_offered_load);
-        GetCpuLoad(scenario, targeted_offered_load, &success);
+        GetCpuLoad(scenario, targeted_offered_load, per_worker_credential_types,
+                   &success);
       } else {
         gpr_log(GPR_ERROR, "Unimplemented search param");
       }
@@ -222,7 +290,7 @@ static bool QpsDriver() {
 }  // namespace grpc
 
 int main(int argc, char** argv) {
-  grpc::testing::InitBenchmark(&argc, &argv, true);
+  grpc::testing::InitTest(&argc, &argv, true);
 
   bool ok = grpc::testing::QpsDriver();
 

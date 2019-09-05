@@ -4,6 +4,14 @@ PHP_ARG_ENABLE(grpc, whether to enable grpc support,
 PHP_ARG_ENABLE(coverage, whether to include code coverage symbols,
 [  --enable-coverage       Enable coverage support], no, no)
 
+PHP_ARG_ENABLE(tests, whether to compile helper methods for tests,
+[  --enable-tests          Enable tests methods], no, no)
+
+dnl Check whether to enable tests
+if test "$PHP_TESTS" != "no"; then
+  CPPFLAGS="$CPPFLAGS -DGRPC_PHP_DEBUG"
+fi
+
 if test "$PHP_GRPC" != "no"; then
   dnl Write more examples of tests here...
 
@@ -34,13 +42,15 @@ if test "$PHP_GRPC" != "no"; then
   dnl  PHP_ADD_LIBRARY(pthread,,GRPC_SHARED_LIBADD)
   GRPC_SHARED_LIBADD="-lpthread $GRPC_SHARED_LIBADD"
   PHP_ADD_LIBRARY(pthread)
-
   PHP_ADD_LIBRARY(dl,,GRPC_SHARED_LIBADD)
   PHP_ADD_LIBRARY(dl)
 
   case $host in
-    *darwin*) ;;
+    *darwin*) 
+      PHP_ADD_LIBRARY(c++,1,GRPC_SHARED_LIBADD)
+      ;;
     *)
+      PHP_ADD_LIBRARY(stdc++,1,GRPC_SHARED_LIBADD)
       PHP_ADD_LIBRARY(rt,,GRPC_SHARED_LIBADD)
       PHP_ADD_LIBRARY(rt)
       ;;
@@ -95,7 +105,7 @@ if test "$PHP_COVERAGE" = "yes"; then
     AC_MSG_ERROR([ccache must be disabled when --enable-coverage option is used. You can disable ccache by setting environment variable CCACHE_DISABLE=1.])
   fi
   
-  lcov_version_list="1.5 1.6 1.7 1.9 1.10 1.11"
+  lcov_version_list="1.5 1.6 1.7 1.9 1.10 1.11 1.12 1.13"
 
   AC_CHECK_PROG(LCOV, lcov, lcov)
   AC_CHECK_PROG(GENHTML, genhtml, genhtml)

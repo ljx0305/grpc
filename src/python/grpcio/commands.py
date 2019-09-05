@@ -1,31 +1,16 @@
-# Copyright 2015, Google Inc.
-# All rights reserved.
+# Copyright 2015 gRPC authors.
 #
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are
-# met:
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#     * Redistributions of source code must retain the above copyright
-# notice, this list of conditions and the following disclaimer.
-#     * Redistributions in binary form must reproduce the above
-# copyright notice, this list of conditions and the following disclaimer
-# in the documentation and/or other materials provided with the
-# distribution.
-#     * Neither the name of Google Inc. nor the names of its
-# contributors may be used to endorse or promote products derived from
-# this software without specific prior written permission.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Provides distutils command classes for the GRPC Python setup process."""
 
 import distutils
@@ -53,36 +38,6 @@ GRPC_STEM = os.path.abspath(PYTHON_STEM + '../../../../')
 PROTO_STEM = os.path.join(GRPC_STEM, 'src', 'proto')
 PROTO_GEN_STEM = os.path.join(GRPC_STEM, 'src', 'python', 'gens')
 CYTHON_STEM = os.path.join(PYTHON_STEM, 'grpc', '_cython')
-
-CONF_PY_ADDENDUM = """
-extensions.append('sphinx.ext.napoleon')
-napoleon_google_docstring = True
-napoleon_numpy_docstring = True
-napoleon_include_special_with_doc = True
-
-html_theme = 'sphinx_rtd_theme'
-copyright = "2016, The gRPC Authors"
-"""
-
-API_GLOSSARY = """
-
-Glossary
-================
-
-.. glossary::
-
-  metadatum
-    A key-value pair included in the HTTP header.  It is a 
-    2-tuple where the first entry is the key and the
-    second is the value, i.e. (key, value).  The metadata key is an ASCII str,
-    and must be a valid HTTP header name.  The metadata value can be
-    either a valid HTTP ASCII str, or bytes.  If bytes are provided,
-    the key must end with '-bin', i.e.
-    ``('binary-metadata-bin', b'\\x00\\xFF')``
-
-  metadata
-    A sequence of metadatum.
-"""
 
 
 class CommandError(Exception):
@@ -119,8 +74,8 @@ def _get_grpc_custom_bdist(decorated_basename, target_bdist_basename):
         with open(bdist_path, 'w') as bdist_file:
             bdist_file.write(bdist_data)
     except IOError as error:
-        raise CommandError('{}\n\nCould not write grpcio bdist: {}'
-                           .format(traceback.format_exc(), error.message))
+        raise CommandError('{}\n\nCould not write grpcio bdist: {}'.format(
+            traceback.format_exc(), error.message))
     return bdist_path
 
 
@@ -139,24 +94,14 @@ class SphinxDocumentation(setuptools.Command):
     def run(self):
         # We import here to ensure that setup.py has had a chance to install the
         # relevant package eggs first.
-        import sphinx
-        import sphinx.apidoc
-        metadata = self.distribution.metadata
-        src_dir = os.path.join(PYTHON_STEM, 'grpc')
-        sys.path.append(src_dir)
-        sphinx.apidoc.main([
-            '', '--force', '--full', '-H', metadata.name, '-A', metadata.author,
-            '-V', metadata.version, '-R', metadata.version, '-o',
-            os.path.join('doc', 'src'), src_dir
-        ])
-        conf_filepath = os.path.join('doc', 'src', 'conf.py')
-        with open(conf_filepath, 'a') as conf_file:
-            conf_file.write(CONF_PY_ADDENDUM)
-        glossary_filepath = os.path.join('doc', 'src', 'grpc.rst')
-        with open(glossary_filepath, 'a') as glossary_filepath:
-            glossary_filepath.write(API_GLOSSARY)
-        sphinx.main(
-            ['', os.path.join('doc', 'src'), os.path.join('doc', 'build')])
+        import sphinx.cmd.build
+        source_dir = os.path.join(GRPC_STEM, 'doc', 'python', 'sphinx')
+        target_dir = os.path.join(GRPC_STEM, 'doc', 'build')
+        exit_code = sphinx.cmd.build.build_main(
+            ['-b', 'html', '-W', '--keep-going', source_dir, target_dir])
+        if exit_code is not 0:
+            raise CommandError(
+                "Documentation generation has warnings or errors")
 
 
 class BuildProjectMetadata(setuptools.Command):
@@ -204,10 +149,11 @@ def check_and_update_cythonization(extensions):
         for source in extension.sources:
             base, file_ext = os.path.splitext(source)
             if file_ext == '.pyx':
-                generated_pyx_source = next((base + gen_ext
-                                             for gen_ext in ('.c', '.cpp',)
-                                             if os.path.isfile(base + gen_ext)),
-                                            None)
+                generated_pyx_source = next(
+                    (base + gen_ext for gen_ext in (
+                        '.c',
+                        '.cpp',
+                    ) if os.path.isfile(base + gen_ext)), None)
                 if generated_pyx_source:
                     generated_pyx_sources.append(generated_pyx_source)
                 else:
@@ -260,12 +206,47 @@ class BuildExt(build_ext.build_ext):
     """Custom build_ext command to enable compiler-specific flags."""
 
     C_OPTIONS = {
-        'unix': ('-pthread', '-std=gnu99'),
+        'unix': ('-pthread',),
         'msvc': (),
     }
     LINK_OPTIONS = {}
 
     def build_extensions(self):
+
+        def compiler_ok_with_extra_std():
+            """Test if default compiler is okay with specifying c++ version
+            when invoked in C mode. GCC is okay with this, while clang is not.
+            """
+            cc_test = subprocess.Popen(
+                ['cc', '-x', 'c', '-std=c++11', '-'],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE)
+            _, cc_err = cc_test.communicate(input=b'int main(){return 0;}')
+            return not 'invalid argument' in str(cc_err)
+
+        # This special conditioning is here due to difference of compiler
+        #   behavior in gcc and clang. The clang doesn't take --stdc++11
+        #   flags but gcc does. Since the setuptools of Python only support
+        #   all C or all C++ compilation, the mix of C and C++ will crash.
+        #   *By default*, macOS and FreBSD use clang and Linux use gcc
+        #
+        #   If we are not using a permissive compiler that's OK with being
+        #   passed wrong std flags, swap out compile function by adding a filter
+        #   for it.
+        if not compiler_ok_with_extra_std():
+            old_compile = self.compiler._compile
+
+            def new_compile(obj, src, ext, cc_args, extra_postargs, pp_opts):
+                if src[-2:] == '.c':
+                    extra_postargs = [
+                        arg for arg in extra_postargs if not '-std=c++' in arg
+                    ]
+                return old_compile(obj, src, ext, cc_args, extra_postargs,
+                                   pp_opts)
+
+            self.compiler._compile = new_compile
+
         compiler = self.compiler.compiler_type
         if compiler in BuildExt.C_OPTIONS:
             for extension in self.extensions:
@@ -290,10 +271,10 @@ class Gather(setuptools.Command):
     """Command to gather project dependencies."""
 
     description = 'gather dependencies for grpcio'
-    user_options = [
-        ('test', 't', 'flag indicating to gather test dependencies'),
-        ('install', 'i', 'flag indicating to gather install dependencies')
-    ]
+    user_options = [('test', 't',
+                     'flag indicating to gather test dependencies'),
+                    ('install', 'i',
+                     'flag indicating to gather install dependencies')]
 
     def initialize_options(self):
         self.test = False

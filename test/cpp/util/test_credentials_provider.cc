@@ -1,53 +1,68 @@
 
 /*
  *
- * Copyright 2016, Google Inc.
- * All rights reserved.
+ * Copyright 2016 gRPC authors.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *     * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
- *     * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  *
  */
 
 #include "test/cpp/util/test_credentials_provider.h"
 
+#include <cstdio>
+#include <fstream>
+#include <iostream>
+
 #include <mutex>
 #include <unordered_map>
 
+#include <gflags/gflags.h>
 #include <grpc/support/log.h>
 #include <grpc/support/sync.h>
+#include <grpcpp/security/server_credentials.h>
 
 #include "test/core/end2end/data/ssl_test_data.h"
+
+DEFINE_string(tls_cert_file, "", "The TLS cert file used when --use_tls=true");
+DEFINE_string(tls_key_file, "", "The TLS key file used when --use_tls=true");
 
 namespace grpc {
 namespace testing {
 namespace {
 
+grpc::string ReadFile(const grpc::string& src_path) {
+  std::ifstream src;
+  src.open(src_path, std::ifstream::in | std::ifstream::binary);
+
+  grpc::string contents;
+  src.seekg(0, std::ios::end);
+  contents.reserve(src.tellg());
+  src.seekg(0, std::ios::beg);
+  contents.assign((std::istreambuf_iterator<char>(src)),
+                  (std::istreambuf_iterator<char>()));
+  return contents;
+}
+
 class DefaultCredentialsProvider : public CredentialsProvider {
  public:
+  DefaultCredentialsProvider() {
+    if (!FLAGS_tls_key_file.empty()) {
+      custom_server_key_ = ReadFile(FLAGS_tls_key_file);
+    }
+    if (!FLAGS_tls_cert_file.empty()) {
+      custom_server_cert_ = ReadFile(FLAGS_tls_cert_file);
+    }
+  }
   ~DefaultCredentialsProvider() override {}
 
   void AddSecureType(
@@ -71,10 +86,15 @@ class DefaultCredentialsProvider : public CredentialsProvider {
       const grpc::string& type, ChannelArguments* args) override {
     if (type == grpc::testing::kInsecureCredentialsType) {
       return InsecureChannelCredentials();
+    } else if (type == grpc::testing::kAltsCredentialsType) {
+      grpc::experimental::AltsCredentialsOptions alts_opts;
+      return grpc::experimental::AltsCredentials(alts_opts);
     } else if (type == grpc::testing::kTlsCredentialsType) {
       SslCredentialsOptions ssl_opts = {test_root_cert, "", ""};
       args->SetSslTargetNameOverride("foo.test.google.fr");
-      return SslCredentials(ssl_opts);
+      return grpc::SslCredentials(ssl_opts);
+    } else if (type == grpc::testing::kGoogleDefaultCredentialsType) {
+      return grpc::GoogleDefaultCredentials();
     } else {
       std::unique_lock<std::mutex> lock(mu_);
       auto it(std::find(added_secure_type_names_.begin(),
@@ -92,12 +112,21 @@ class DefaultCredentialsProvider : public CredentialsProvider {
       const grpc::string& type) override {
     if (type == grpc::testing::kInsecureCredentialsType) {
       return InsecureServerCredentials();
+    } else if (type == grpc::testing::kAltsCredentialsType) {
+      grpc::experimental::AltsServerCredentialsOptions alts_opts;
+      return grpc::experimental::AltsServerCredentials(alts_opts);
     } else if (type == grpc::testing::kTlsCredentialsType) {
-      SslServerCredentialsOptions::PemKeyCertPair pkcp = {test_server1_key,
-                                                          test_server1_cert};
       SslServerCredentialsOptions ssl_opts;
       ssl_opts.pem_root_certs = "";
-      ssl_opts.pem_key_cert_pairs.push_back(pkcp);
+      if (!custom_server_key_.empty() && !custom_server_cert_.empty()) {
+        SslServerCredentialsOptions::PemKeyCertPair pkcp = {
+            custom_server_key_, custom_server_cert_};
+        ssl_opts.pem_key_cert_pairs.push_back(pkcp);
+      } else {
+        SslServerCredentialsOptions::PemKeyCertPair pkcp = {test_server1_key,
+                                                            test_server1_cert};
+        ssl_opts.pem_key_cert_pairs.push_back(pkcp);
+      }
       return SslServerCredentials(ssl_opts);
     } else {
       std::unique_lock<std::mutex> lock(mu_);
@@ -127,6 +156,8 @@ class DefaultCredentialsProvider : public CredentialsProvider {
   std::vector<grpc::string> added_secure_type_names_;
   std::vector<std::unique_ptr<CredentialTypeProvider>>
       added_secure_type_providers_;
+  grpc::string custom_server_key_;
+  grpc::string custom_server_cert_;
 };
 
 CredentialsProvider* g_provider = nullptr;

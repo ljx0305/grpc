@@ -1,33 +1,20 @@
-# Copyright 2015, Google Inc.
-# All rights reserved.
+# Copyright 2015 gRPC authors.
 #
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are
-# met:
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#     * Redistributions of source code must retain the above copyright
-# notice, this list of conditions and the following disclaimer.
-#     * Redistributions in binary form must reproduce the above
-# copyright notice, this list of conditions and the following disclaimer
-# in the documentation and/or other materials provided with the
-# distribution.
-#     * Neither the name of Google Inc. nor the names of its
-# contributors may be used to endorse or promote products derived from
-# this software without specific prior written permission.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-require_relative './grpc'
+require_relative './structs'
+require_relative './core/status_codes'
+require_relative './google_rpc_status_utils'
 
 # GRPC contains the General RPC module.
 module GRPC
@@ -57,15 +44,30 @@ module GRPC
       @metadata = metadata
     end
 
-    # Converts the exception to a GRPC::Status for use in the networking
+    # Converts the exception to a {Struct::Status} for use in the networking
     # wrapper layer.
     #
-    # @return [Status] with the same code and details
+    # @return [Struct::Status] with the same code and details
     def to_status
-      Struct::Status.new(code, details, @metadata)
+      Struct::Status.new(code, details, metadata)
     end
 
-    def self.new_status_exception(code, details = 'unkown cause', metadata = {})
+    # Converts the exception to a deserialized {Google::Rpc::Status} object.
+    # Returns `nil` if the `grpc-status-details-bin` trailer could not be
+    # converted to a {Google::Rpc::Status} due to the server not providing
+    # the necessary trailers.
+    #
+    # @return [Google::Rpc::Status, nil]
+    def to_rpc_status
+      GoogleRpcStatusUtils.extract_google_rpc_status(to_status)
+    rescue Google::Protobuf::ParseError => parse_error
+      GRPC.logger.warn('parse error: to_rpc_status failed')
+      GRPC.logger.warn(parse_error)
+      nil
+    end
+
+    def self.new_status_exception(code, details = 'unknown cause',
+                                  metadata = {})
       codes = {}
       codes[OK] = Ok
       codes[CANCELLED] = Cancelled
@@ -74,16 +76,15 @@ module GRPC
       codes[DEADLINE_EXCEEDED] = DeadlineExceeded
       codes[NOT_FOUND] = NotFound
       codes[ALREADY_EXISTS] = AlreadyExists
-      codes[PERMISSION_DENIED] =  PermissionDenied
+      codes[PERMISSION_DENIED] = PermissionDenied
       codes[UNAUTHENTICATED] = Unauthenticated
       codes[RESOURCE_EXHAUSTED] = ResourceExhausted
       codes[FAILED_PRECONDITION] = FailedPrecondition
       codes[ABORTED] = Aborted
       codes[OUT_OF_RANGE] = OutOfRange
-      codes[UNIMPLEMENTED] =  Unimplemented
+      codes[UNIMPLEMENTED] = Unimplemented
       codes[INTERNAL] = Internal
-      codes[UNIMPLEMENTED] =  Unimplemented
-      codes[UNAVAILABLE] =  Unavailable
+      codes[UNAVAILABLE] = Unavailable
       codes[DATA_LOSS] = DataLoss
 
       if codes[code].nil?
